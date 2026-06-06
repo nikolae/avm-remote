@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <title>AVM Remote</title>
+  <meta name="theme-color" content="#0b0d12" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AVM" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>AVM&nbsp;90</h1>
+      <span id="conn" class="conn" title="Connection status">
+        <span class="dot"></span><span id="conn-text">connecting…</span>
+      </span>
+    </header>
+
+    <main>
+      <!-- Power -->
+      <button id="power" class="power" aria-label="Power">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3v9" />
+          <path d="M7.5 6.7a7 7 0 1 0 9 0" />
+        </svg>
+        <span id="power-label">Power</span>
+      </button>
+
+      <!-- Now playing -->
+      <section class="card now-playing">
+        <div class="np-input" id="np-input">—</div>
+        <div class="np-meta">
+          <span id="np-mode">—</span>
+          <span id="np-format"></span>
+        </div>
+      </section>
+
+      <!-- Volume -->
+      <section class="card volume">
+        <div class="vol-readout">
+          <span id="vol-value">—</span><span class="vol-unit">dB</span>
+        </div>
+        <input
+          id="vol-slider"
+          class="vol-slider"
+          type="range"
+          min="0"
+          max="100"
+          value="0"
+        />
+        <div class="vol-buttons">
+          <button id="vol-down" class="round" aria-label="Volume down">−</button>
+          <button id="mute" class="mute" aria-label="Mute">Mute</button>
+          <button id="vol-up" class="round" aria-label="Volume up">+</button>
+        </div>
+      </section>
+
+      <!-- Inputs -->
+      <section class="card">
+        <h2>Input</h2>
+        <div id="inputs" class="grid"></div>
+      </section>
+
+      <!-- Listening modes -->
+      <section class="card">
+        <h2>Listening Mode</h2>
+        <div id="modes" class="grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

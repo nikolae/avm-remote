@@ -1,0 +1,13 @@
+services:
+  avm-remote:
+    build: .
+    image: avm-remote
+    container_name: avm-remote
+    ports:
+      - "8000:8000"
+    environment:
+      # IP address of your Anthem AVM90 on the LAN (required).
+      ANTHEM_HOST: "${ANTHEM_HOST:?set ANTHEM_HOST to your receiver's IP, e.g. 10.125.200.128}"
+      # IP-control port (default 14999, rarely needs changing).
+      ANTHEM_PORT: "${ANTHEM_PORT:-14999}"
+    restart: unless-stopped

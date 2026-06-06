@@ -1,0 +1,12 @@
+.git
+.gitignore
+.claude
+.dockerignore
+Dockerfile
+docker-compose.yml
+README.md
+LICENSE
+scripts
+**/__pycache__
+**/*.pyc
+.DS_Store

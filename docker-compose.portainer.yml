@@ -1,0 +1,17 @@
+# Portainer stack compose. Unlike docker-compose.yml this does NOT build from
+# source (Portainer has no build context) — it uses the image you've already
+# loaded onto the host (`docker load` / `docker images` shows avm-remote:latest).
+#
+# In Portainer: Stacks -> Add stack -> paste this -> set ANTHEM_HOST in the
+# "Environment variables" section (or rely on the default below).
+services:
+  avm-remote:
+    image: avm-remote:latest
+    container_name: avm-remote
+    ports:
+      - "8000:8000"
+    environment:
+      # Your Anthem AVM90's LAN IP. Override in Portainer's env-vars section.
+      ANTHEM_HOST: "${ANTHEM_HOST:-10.125.200.128}"
+      ANTHEM_PORT: "${ANTHEM_PORT:-14999}"
+    restart: unless-stopped
