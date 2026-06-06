@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
+import time
 from typing import Optional
 
 from anthemav.connection import Connection
@@ -24,6 +26,12 @@ _LOGGER = logging.getLogger(__name__)
 # limit; we only ever care about the latest state, so we drop the oldest.
 _QUEUE_MAXSIZE = 8
 
+# Connection maintenance cadence (the maintain loop ticks every _POLL_INTERVAL).
+_POLL_INTERVAL = 2.0  # seconds between loop ticks / connection-state checks
+_HEARTBEAT_EVERY = 5  # ticks -> ~10s: send a liveness query
+_RESYNC_EVERY = 30  # ticks -> ~60s: full state refresh to recover missed pushes
+_STALE_AFTER = 30.0  # seconds without any RX -> force a reconnect
+
 
 class AnthemController:
     """Maintain receiver state and broadcast changes to subscribers."""
@@ -34,21 +42,22 @@ class AnthemController:
         self._conn: Optional[Connection] = None
         self._subscribers: set[asyncio.Queue[ReceiverState]] = set()
         self._task: Optional[asyncio.Task] = None
-        self._watch_task: Optional[asyncio.Task] = None
+        self._maintain_task: Optional[asyncio.Task] = None
         self._last_connected: Optional[bool] = None
+        self._last_rx: float = 0.0  # monotonic time of last datagram from device
 
     # --- lifecycle ------------------------------------------------------------
 
     async def start(self) -> None:
-        """Begin connecting in the background and start the connection watcher.
+        """Begin connecting in the background and start the maintenance loop.
 
         We deliberately do not block here: if the receiver is unreachable the
         anthemav library retries with backoff forever, and the web server should
         come up regardless (reporting `connected: false` until it links up).
         """
         self._task = asyncio.create_task(self._connect(), name="anthem-connect")
-        self._watch_task = asyncio.create_task(
-            self._connection_watch(), name="anthem-watch"
+        self._maintain_task = asyncio.create_task(
+            self._maintain(), name="anthem-maintain"
         )
 
     async def _connect(self) -> None:
@@ -59,16 +68,128 @@ class AnthemController:
                 auto_reconnect=True,
                 update_callback=self._on_update,
             )
+            # The first connection_made fired inside create() before our hooks
+            # were installed, so prime liveness/keepalive for it explicitly.
+            self._install_hooks()
+            self._last_rx = time.monotonic()
+            self._configure_socket()
             _LOGGER.info("Connected to Anthem at %s:%s", self._host, self._port)
+            self._broadcast(self.snapshot())
         except Exception:  # pragma: no cover - defensive
             _LOGGER.exception("Failed to establish Anthem connection")
 
     async def stop(self) -> None:
-        for task in (self._watch_task, self._task):
+        for task in (self._maintain_task, self._task):
             if task:
                 task.cancel()
         if self._conn:
             self._conn.close()
+
+    def _install_hooks(self) -> None:
+        """Wrap the protocol's asyncio callbacks to track liveness and keepalive.
+
+        anthemav's `Connection` reuses the same protocol instance across
+        reconnects, so patching once here covers every future reconnect too.
+        """
+        p = self._conn.protocol
+        if getattr(p, "_avmremote_hooked", False):
+            return
+
+        orig_data_received = p.data_received
+        orig_connection_made = p.connection_made
+
+        def data_received(data):
+            self._last_rx = time.monotonic()
+            return orig_data_received(data)
+
+        def connection_made(transport):
+            result = orig_connection_made(transport)
+            self._last_rx = time.monotonic()
+            self._configure_socket()
+            self._broadcast(self.snapshot())  # surface reconnects promptly
+            return result
+
+        p.data_received = data_received
+        p.connection_made = connection_made
+        p._avmremote_hooked = True
+
+    def _configure_socket(self) -> None:
+        """Enable TCP keepalive so dead/half-open links are detected quickly.
+
+        Without this a silently-dropped connection lingers as "connected" until
+        a write finally fails minutes later, freezing status updates. Keepalive
+        lets the OS notice the dead peer and close the socket, which triggers
+        anthemav's auto-reconnect.
+        """
+        p = self._protocol
+        if p is None or p.transport is None:
+            return
+        sock = p.transport.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Linux-specific tuning (present in the container); skipped elsewhere.
+            for name, value in (
+                ("TCP_KEEPIDLE", 15),
+                ("TCP_KEEPINTVL", 5),
+                ("TCP_KEEPCNT", 3),
+            ):
+                opt = getattr(socket, name, None)
+                if opt is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, opt, value)
+        except OSError:  # pragma: no cover - platform dependent
+            pass
+
+    async def _maintain(self) -> None:
+        """Keep the link healthy and the UI's connection state current.
+
+        Every tick: push a snapshot if the connected flag flipped. While
+        connected: periodically probe liveness (a core query that the receiver
+        answers even in standby), force a reconnect if the link has gone silent,
+        and resync full state occasionally to recover any missed pushes.
+        """
+        tick = 0
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL)
+
+            connected = self.connected
+            if connected != self._last_connected:
+                self._last_connected = connected
+                self._broadcast(self.snapshot())
+
+            if not connected:
+                continue
+
+            tick += 1
+            p = self._conn.protocol
+
+            if tick % _HEARTBEAT_EVERY == 0:
+                # IDM (model) is a core attribute the unit answers regardless of
+                # power state, so it's a safe liveness probe.
+                try:
+                    p.query("IDM")
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                if self._last_rx and (time.monotonic() - self._last_rx) > _STALE_AFTER:
+                    _LOGGER.warning(
+                        "No data from receiver for >%.0fs; forcing reconnect",
+                        _STALE_AFTER,
+                    )
+                    try:
+                        if p.transport is not None:
+                            p.transport.close()  # -> connection_lost -> reconnect
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    continue
+
+            if tick % _RESYNC_EVERY == 0:
+                try:
+                    await p.refresh_power()
+                    await p.refresh_zone(1)
+                    await p.refresh_all()
+                except Exception:  # pragma: no cover - defensive
+                    pass
 
     # --- pub/sub --------------------------------------------------------------
 
@@ -96,19 +217,6 @@ class AnthemController:
     def _on_update(self, _message: str) -> None:
         """anthemav update_callback: scheduled on the loop, so it's safe here."""
         self._broadcast(self.snapshot())
-
-    async def _connection_watch(self) -> None:
-        """Push a snapshot when the transport link goes up or down.
-
-        anthemav fires update_callback on *data* changes but not on the socket
-        itself dropping, so the UI's connection indicator would otherwise lag.
-        """
-        while True:
-            connected = self.connected
-            if connected != self._last_connected:
-                self._last_connected = connected
-                self._broadcast(self.snapshot())
-            await asyncio.sleep(2)
 
     # --- state ----------------------------------------------------------------
 

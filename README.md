@@ -108,6 +108,28 @@ python scripts/probe.py 10.125.200.128 --watch  # stream live changes
 Command endpoints return the immediate (pre-change) snapshot; the authoritative
 post-change state always arrives over the WebSocket a moment later.
 
+## Troubleshooting
+
+**Flaky connection / status that goes stale or "sometimes works":**
+
+1. **Enable Standby IP Control on the receiver.** *Setup → Network* (or
+   *General → Standby IP Control* depending on firmware). If this is **off**, the
+   AVM90 drops off the network when powered down and won't answer IP control,
+   which looks exactly like an intermittent connection. Turn it **on**.
+2. **Close the native Anthem app / ARC software.** The receiver accepts only
+   **one** IP-control connection at a time; another client will fight this one.
+3. The backend already self-heals dropped links: it enables TCP keepalive, sends
+   a liveness probe every ~10s, forces a reconnect if the link goes silent for
+   30s, and resyncs full state every ~60s. After a network blip or a receiver
+   power-cycle the UI should recover on its own within a few seconds.
+
+Confirm what the receiver is actually doing with the probe — leave it running and
+watch the link:
+
+```sh
+python scripts/probe.py 10.125.200.128 --watch
+```
+
 ## Notes
 
 - The AVM90 is an "x40"-series device: volume is a 0–100 percentage and listening
