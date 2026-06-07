@@ -89,12 +89,16 @@ async def set_power(cmd: PowerCommand) -> ReceiverState:
 @app.post("/api/volume", response_model=ReceiverState)
 async def set_volume(cmd: VolumeCommand) -> ReceiverState:
     controller = get_controller()
-    if cmd.level is not None:
+    if cmd.db is not None:
+        _run(lambda: controller.set_volume_db(cmd.db))
+    elif cmd.level is not None:
         _run(lambda: controller.set_volume(cmd.level))
     elif cmd.step is not None:
         _run(lambda: controller.step_volume(cmd.step))
     else:
-        raise HTTPException(status_code=422, detail="Provide either 'level' or 'step'")
+        raise HTTPException(
+            status_code=422, detail="Provide one of 'db', 'level', or 'step'"
+        )
     return controller.snapshot()
 
 

@@ -53,7 +53,8 @@ const DEFAULT_SETTINGS = {
   // (Querying this from the unit over IP is TODO — see TODO.md.)
   maxVolumeDb: 0,
 };
-const VOL_FLOOR_DB = -90; // slider's 0% position (receiver mute floor)
+const VOL_FLOOR_DB = -90; // receiver mute floor (PVOL 0%)
+const VOL_CEIL_DB = 0; // receiver reference max that PVOL 100% maps to
 
 function loadSettings() {
   try {
@@ -79,10 +80,11 @@ const maxDb = () =>
   state && state.max_volume_db != null
     ? state.max_volume_db
     : Number(settings.maxVolumeDb) || 0;
-// Map a slider percentage to an estimated dB across [VOL_FLOOR_DB .. maxVolumeDb].
-// Used for the live drag readout; the receiver's true dB snaps in on release.
+// Estimate dB from a PVOL %, across the receiver's full range [floor .. ceil]
+// (PVOL maps over the whole hardware range, NOT the configured max limit). Only
+// a fallback for when the true volume_db hasn't been reported yet.
 const estDb = (pct) =>
-  Math.round(VOL_FLOOR_DB + (pct / 100) * (maxDb() - VOL_FLOOR_DB));
+  Math.round(VOL_FLOOR_DB + (pct / 100) * (VOL_CEIL_DB - VOL_FLOOR_DB));
 
 // Readout for a given state, honoring the volume-unit setting.
 function volumeReadout(s) {
@@ -115,8 +117,19 @@ function configureSlider(s) {
     volSlider.value = s.volume_db != null ? s.volume_db : estDb(s.volume);
   }
 }
-// Convert a slider value (in the current unit) to a 0-100 PVOL level to send.
-const sliderLevel = (v) => Math.max(0, Math.min(100, pctFromTyped(v)));
+// Send a new volume from a value in the current display unit. In dB mode we set
+// the true dB directly (Z1VOL) — exact, no %↔dB conversion; in % mode, PVOL.
+function sendVolume(v) {
+  if (settings.volumeUnit === "pct") {
+    const level = Math.max(0, Math.min(100, Math.round(v)));
+    optimistic({ volume: level });
+    postCmd("/api/volume", { level });
+  } else {
+    const db = Math.max(VOL_FLOOR_DB, Math.min(maxDb(), Math.round(v * 2) / 2));
+    optimistic({ volume_db: db });
+    postCmd("/api/volume", { db });
+  }
+}
 const volUnit = document.querySelector(".vol-unit");
 function setVolDisplay({ value, unit }) {
   volValue.textContent = value;
@@ -235,17 +248,11 @@ muteBtn.addEventListener("click", () => {
 // Nudge the volume: ±1 dB in dB mode, ±2% in % mode.
 function nudge(dir) {
   if (settings.volumeUnit === "pct") {
-    const cur = state ? state.volume : 0;
-    const level = Math.max(0, Math.min(100, cur + dir * 2));
-    optimistic({ volume: level });
-    postCmd("/api/volume", { level });
+    sendVolume((state ? state.volume : 0) + dir * 2);
   } else {
     const curDb =
       state && state.volume_db != null ? state.volume_db : estDb(state ? state.volume : 0);
-    const newDb = Math.max(VOL_FLOOR_DB, Math.min(maxDb(), curDb + dir));
-    const level = sliderLevel(newDb);
-    optimistic({ volume: level, volume_db: newDb });
-    postCmd("/api/volume", { level });
+    sendVolume(curDb + dir);
   }
 }
 el("vol-up").addEventListener("click", () => nudge(+1));
@@ -259,15 +266,7 @@ volSlider.addEventListener("input", () => {
 function commitVolume() {
   if (!draggingVolume) return;
   draggingVolume = false;
-  const v = Number(volSlider.value);
-  const level = sliderLevel(v);
-  // Hold the dragged position (including the dB) until the receiver confirms.
-  optimistic(
-    settings.volumeUnit === "pct"
-      ? { volume: level }
-      : { volume: level, volume_db: v }
-  );
-  postCmd("/api/volume", { level });
+  sendVolume(Number(volSlider.value));
 }
 volSlider.addEventListener("change", commitVolume);
 volSlider.addEventListener("pointerup", commitVolume);
@@ -276,13 +275,6 @@ volSlider.addEventListener("pointerup", commitVolume);
 const volReadout = el("vol-readout");
 const volInput = el("vol-input");
 const volValueSpan = el("vol-value");
-
-function pctFromTyped(num) {
-  // Interpret the typed value in whatever unit is shown, return a 0-100 level.
-  if (settings.volumeUnit === "pct") return Math.round(num);
-  // dB -> % across [VOL_FLOOR_DB .. maxVolumeDb] (inverse of estDb).
-  return Math.round(((num - VOL_FLOOR_DB) / (maxDb() - VOL_FLOOR_DB)) * 100);
-}
 
 function openVolumeEntry() {
   if (!state) return;
@@ -301,11 +293,7 @@ function closeVolumeEntry(commit) {
   if (volInput.hidden) return;
   if (commit) {
     const num = parseFloat(volInput.value);
-    if (!Number.isNaN(num)) {
-      const level = Math.max(0, Math.min(100, pctFromTyped(num)));
-      optimistic({ volume: level });
-      postCmd("/api/volume", { level });
-    }
+    if (!Number.isNaN(num)) sendVolume(num);
   }
   volInput.hidden = true;
   volValueSpan.hidden = false;

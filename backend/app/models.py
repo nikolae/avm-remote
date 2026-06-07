@@ -50,7 +50,9 @@ class PowerCommand(BaseModel):
 
 
 class VolumeCommand(BaseModel):
-    # Either set an absolute level (0-100) or nudge by a relative step.
+    # Set an absolute dB level (Z1VOL), an absolute 0-100 level (PVOL), or nudge
+    # by a relative step. `db` is preferred — it's exact and avoids %↔dB mapping.
+    db: float | None = Field(default=None, ge=-90, le=10)
     level: int | None = Field(default=None, ge=0, le=100)
     step: int | None = None
 

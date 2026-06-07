@@ -328,6 +328,15 @@ class AnthemController:
     def set_volume(self, level: int) -> None:
         self._require_protocol().volume = max(0, min(100, level))
 
+    def set_volume_db(self, db: float) -> None:
+        # Set the true volume in dB directly (Z1VOL). The unit accepts this and
+        # uses 0.5 dB steps, so we snap and send one decimal (e.g. "Z1VOL-50.0").
+        # This avoids the lossy %↔dB conversion the percentage path needs.
+        p = self._require_protocol()
+        db = max(-90.0, min(10.0, round(db * 2) / 2))
+        p.command(f"Z1VOL{db:.1f}")
+        p.query("Z1VOL")  # read back to confirm
+
     def step_volume(self, step: int) -> None:
         p = self._require_protocol()
         p.volume = max(0, min(100, int(p.volume) + step))
