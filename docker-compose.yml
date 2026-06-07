@@ -10,4 +10,6 @@ services:
       ANTHEM_HOST: "${ANTHEM_HOST:?set ANTHEM_HOST to your receiver's IP, e.g. 10.125.200.128}"
       # IP-control port (default 14999, rarely needs changing).
       ANTHEM_PORT: "${ANTHEM_PORT:-14999}"
+      # How often to re-poll full state from the receiver, in seconds (0 disables).
+      ANTHEM_RESYNC_SECONDS: "${ANTHEM_RESYNC_SECONDS:-30}"
     restart: unless-stopped

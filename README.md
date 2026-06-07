@@ -51,11 +51,12 @@ screen.
 
 ### Configuration
 
-| Variable      | Required | Default | Description                          |
-| ------------- | -------- | ------- | ------------------------------------ |
-| `ANTHEM_HOST` | yes      | —       | Receiver IP address / hostname       |
-| `ANTHEM_PORT` | no       | `14999` | IP-control TCP port                  |
-| `LOG_LEVEL`   | no       | `INFO`  | Python log level for the backend     |
+| Variable                | Required | Default | Description                                              |
+| ----------------------- | -------- | ------- | -------------------------------------------------------- |
+| `ANTHEM_HOST`           | yes      | —       | Receiver IP address / hostname                           |
+| `ANTHEM_PORT`           | no       | `14999` | IP-control TCP port                                      |
+| `ANTHEM_RESYNC_SECONDS` | no       | `30`    | How often to re-poll full state from the receiver (`0` disables) |
+| `LOG_LEVEL`             | no       | `INFO`  | Python log level for the backend                         |
 
 ## Local development
 
@@ -128,6 +129,16 @@ watch the link:
 
 ```sh
 python scripts/probe.py 10.125.200.128 --watch
+```
+
+**Now-playing (audio format / channels / sample rate) is blank:** those values
+come from per-signal status queries that only return meaningful data when audio
+is actively playing — and some firmware revisions use different command names.
+Run the diagnostic **with audio playing** to see exactly what your unit answers
+for each status command (a value, `INVALID COMMAND`, or `NO REPLY`):
+
+```sh
+python scripts/probe.py 10.125.200.128 --diag
 ```
 
 ## Notes

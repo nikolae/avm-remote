@@ -14,4 +14,5 @@ services:
       # Your Anthem AVM90's LAN IP. Override in Portainer's env-vars section.
       ANTHEM_HOST: "${ANTHEM_HOST:-10.125.200.128}"
       ANTHEM_PORT: "${ANTHEM_PORT:-14999}"
+      ANTHEM_RESYNC_SECONDS: "${ANTHEM_RESYNC_SECONDS:-30}"
     restart: unless-stopped

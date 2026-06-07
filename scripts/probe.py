@@ -48,6 +48,101 @@ def describe(protocol) -> str:
     return "\n".join(lines)
 
 
+# Now-playing / status commands we query and show in the app, by display name.
+DIAG_COMMANDS = [
+    ("Z1AIF", "audio input format"),
+    ("Z1AIC", "audio input channels"),
+    ("Z1AIN", "audio input name"),
+    ("Z1AIR", "audio input rate name"),
+    ("Z1SRT", "audio sample rate (kHz)"),
+    ("Z1BRT", "audio bitrate (kbps)"),
+    ("Z1VIR", "video input resolution"),
+    ("Z1IRH", "video horizontal res"),
+    ("Z1IRV", "video vertical res"),
+    ("Z1ALM", "audio listening mode"),
+]
+
+
+async def run_raw(protocol, commands: list[str]) -> None:
+    """Send arbitrary raw commands and print exactly what the receiver replies.
+
+    Use this to discover the receiver's real behavior — e.g. to learn how it
+    numbers listening modes, change the mode on the front panel and query it:
+
+        --raw 'Z1ALM?'          # see the current mode number
+        --raw 'Z1ALM03'         # try selecting a mode, watch the reply
+    """
+    captured: list[str] = []
+    original_data_received = protocol.data_received
+
+    def tap(data):
+        try:
+            captured.append(data.decode(errors="ignore"))
+        except Exception:
+            pass
+        return original_data_received(data)
+
+    protocol.data_received = tap
+
+    print("\n=== Raw command test ===")
+    for command in commands:
+        captured.clear()
+        protocol.command(command.rstrip(";"))
+        await asyncio.sleep(0.5)
+        raw = "".join(captured).strip()
+        reply = repr(raw) if raw else "(none)"
+        print(f"  sent {command!r:18} -> reply {reply}")
+
+    protocol.data_received = original_data_received
+
+
+async def run_diag(protocol) -> None:
+    """Query each status command and report the raw reply from the receiver.
+
+    This is the definitive test for the "now-playing is blank" problem: it shows,
+    per command, whether the unit answered with a value, rejected it as an invalid
+    command, or stayed silent. Run with audio actually playing.
+    """
+    # Capture the raw datagram stream so we can see exactly what comes back,
+    # including "!I" (invalid command) replies the library would otherwise hide.
+    captured: list[str] = []
+    original_data_received = protocol.data_received
+
+    def tap(data):
+        try:
+            captured.append(data.decode(errors="ignore"))
+        except Exception:
+            pass
+        return original_data_received(data)
+
+    protocol.data_received = tap
+
+    print("\n=== Status command diagnostic ===")
+    print("Querying each command (play audio for meaningful values)...\n")
+
+    for command, label in DIAG_COMMANDS:
+        captured.clear()
+        setattr(protocol, f"_{command}", "")  # clear any cached value
+        protocol.query(command)
+        await asyncio.sleep(0.4)
+        raw = "".join(captured).strip()
+        parsed = getattr(protocol, f"_{command}", "")
+        # Classify the result for quick scanning.
+        if f"!I{command}" in raw or "Invalid" in raw:
+            verdict = "INVALID COMMAND (not supported on this model)"
+        elif raw == "":
+            verdict = "NO REPLY"
+        else:
+            verdict = f"raw={raw!r} parsed={parsed!r}"
+        print(f"  {command:7} {label:24} -> {verdict}")
+
+    protocol.data_received = original_data_received
+    print(
+        "\nIf commands show INVALID/NO REPLY, this firmware uses different status\n"
+        "commands than anthemav sends — share this output and we'll map them."
+    )
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("host", help="Receiver IP address or hostname")
@@ -56,6 +151,20 @@ async def main() -> None:
         "--watch", action="store_true", help="Stay connected and stream updates"
     )
     parser.add_argument("--debug", action="store_true", help="Verbose protocol logs")
+    parser.add_argument(
+        "--diag",
+        action="store_true",
+        help="Probe each now-playing status command and dump the raw replies "
+        "(run with audio actually playing on the receiver)",
+    )
+    parser.add_argument(
+        "--raw",
+        nargs="+",
+        metavar="CMD",
+        help="Send raw protocol command(s) and print the reply, e.g. "
+        "--raw 'Z1ALM?' 'Z1ALM03' 'Z1ALM?' (no trailing ';'). Great for "
+        "discovering how your unit numbers listening modes.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING)
@@ -95,6 +204,12 @@ async def main() -> None:
     await asyncio.sleep(2)
     print("\n=== Receiver state ===")
     print(describe(conn.protocol))
+
+    if args.diag:
+        await run_diag(conn.protocol)
+
+    if args.raw:
+        await run_raw(conn.protocol, args.raw)
 
     if args.watch:
         print("\nWatching for changes (Ctrl-C to quit) ...")

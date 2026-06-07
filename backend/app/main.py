@@ -38,8 +38,9 @@ async def lifespan(app: FastAPI):
     if not host:
         raise RuntimeError("ANTHEM_HOST environment variable is required")
     port = int(os.environ.get("ANTHEM_PORT", "14999"))
+    resync_seconds = float(os.environ.get("ANTHEM_RESYNC_SECONDS", "30"))
 
-    controller = AnthemController(host=host, port=port)
+    controller = AnthemController(host=host, port=port, resync_seconds=resync_seconds)
     app.state.controller = controller
     await controller.start()
     _LOGGER.info("AVM Remote started, talking to %s:%s", host, port)

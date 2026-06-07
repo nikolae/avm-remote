@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-import time
 from typing import Optional
 
 from anthemav.connection import Connection
@@ -26,25 +25,34 @@ _LOGGER = logging.getLogger(__name__)
 # limit; we only ever care about the latest state, so we drop the oldest.
 _QUEUE_MAXSIZE = 8
 
-# Connection maintenance cadence (the maintain loop ticks every _POLL_INTERVAL).
+# The maintenance loop ticks every _POLL_INTERVAL seconds; the resync cadence is
+# configurable (ANTHEM_RESYNC_SECONDS) and converted to a tick count at runtime.
 _POLL_INTERVAL = 2.0  # seconds between loop ticks / connection-state checks
-_HEARTBEAT_EVERY = 5  # ticks -> ~10s: send a liveness query
-_RESYNC_EVERY = 30  # ticks -> ~60s: full state refresh to recover missed pushes
-_STALE_AFTER = 30.0  # seconds without any RX -> force a reconnect
+_DEFAULT_RESYNC_SECONDS = 30.0
 
 
 class AnthemController:
     """Maintain receiver state and broadcast changes to subscribers."""
 
-    def __init__(self, host: str, port: int = 14999) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int = 14999,
+        resync_seconds: float = _DEFAULT_RESYNC_SECONDS,
+    ) -> None:
         self._host = host
         self._port = port
+        # How often to re-query full state, as a number of poll-loop ticks
+        # (minimum 1 tick). 0 or negative disables periodic resync.
+        if resync_seconds and resync_seconds > 0:
+            self._resync_every = max(1, round(resync_seconds / _POLL_INTERVAL))
+        else:
+            self._resync_every = 0
         self._conn: Optional[Connection] = None
         self._subscribers: set[asyncio.Queue[ReceiverState]] = set()
         self._task: Optional[asyncio.Task] = None
         self._maintain_task: Optional[asyncio.Task] = None
         self._last_connected: Optional[bool] = None
-        self._last_rx: float = 0.0  # monotonic time of last datagram from device
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -68,10 +76,9 @@ class AnthemController:
                 auto_reconnect=True,
                 update_callback=self._on_update,
             )
-            # The first connection_made fired inside create() before our hooks
-            # were installed, so prime liveness/keepalive for it explicitly.
+            # The first connection_made fired inside create() before our hook
+            # was installed, so apply keepalive to it explicitly.
             self._install_hooks()
-            self._last_rx = time.monotonic()
             self._configure_socket()
             _LOGGER.info("Connected to Anthem at %s:%s", self._host, self._port)
             self._broadcast(self.snapshot())
@@ -86,7 +93,7 @@ class AnthemController:
             self._conn.close()
 
     def _install_hooks(self) -> None:
-        """Wrap the protocol's asyncio callbacks to track liveness and keepalive.
+        """Wrap the protocol's connection_made to reapply keepalive on reconnect.
 
         anthemav's `Connection` reuses the same protocol instance across
         reconnects, so patching once here covers every future reconnect too.
@@ -95,31 +102,25 @@ class AnthemController:
         if getattr(p, "_avmremote_hooked", False):
             return
 
-        orig_data_received = p.data_received
         orig_connection_made = p.connection_made
-
-        def data_received(data):
-            self._last_rx = time.monotonic()
-            return orig_data_received(data)
 
         def connection_made(transport):
             result = orig_connection_made(transport)
-            self._last_rx = time.monotonic()
             self._configure_socket()
             self._broadcast(self.snapshot())  # surface reconnects promptly
             return result
 
-        p.data_received = data_received
         p.connection_made = connection_made
         p._avmremote_hooked = True
 
     def _configure_socket(self) -> None:
-        """Enable TCP keepalive so dead/half-open links are detected quickly.
+        """Enable TCP keepalive so a genuinely dead link is detected by the OS.
 
-        Without this a silently-dropped connection lingers as "connected" until
-        a write finally fails minutes later, freezing status updates. Keepalive
-        lets the OS notice the dead peer and close the socket, which triggers
-        anthemav's auto-reconnect.
+        This is the *safe* way to notice a dropped connection: the kernel probes
+        an idle socket and, only if the peer is truly gone, closes it — which
+        triggers anthemav's auto-reconnect. Unlike an application-level "no data
+        in N seconds" timer, it never tears down a connection to a receiver that
+        is simply idle or powered off (which would break commands like power-on).
         """
         p = self._protocol
         if p is None or p.transport is None:
@@ -142,12 +143,15 @@ class AnthemController:
             pass
 
     async def _maintain(self) -> None:
-        """Keep the link healthy and the UI's connection state current.
+        """Keep the UI's connection state current and state fresh.
 
-        Every tick: push a snapshot if the connected flag flipped. While
-        connected: periodically probe liveness (a core query that the receiver
-        answers even in standby), force a reconnect if the link has gone silent,
-        and resync full state occasionally to recover any missed pushes.
+        Every tick, push a snapshot if the connected flag flipped. While
+        connected, periodically re-query state as a safety net in case a pushed
+        update was missed. We deliberately do NOT run an application-level
+        liveness timer that force-closes "silent" connections: an idle or
+        powered-off receiver is legitimately quiet, and tearing the link down
+        would drop commands like power-on. Dead sockets are handled by TCP
+        keepalive (see _configure_socket) plus anthemav's own auto-reconnect.
         """
         tick = 0
         while True:
@@ -162,28 +166,8 @@ class AnthemController:
                 continue
 
             tick += 1
-            p = self._conn.protocol
-
-            if tick % _HEARTBEAT_EVERY == 0:
-                # IDM (model) is a core attribute the unit answers regardless of
-                # power state, so it's a safe liveness probe.
-                try:
-                    p.query("IDM")
-                except Exception:  # pragma: no cover - defensive
-                    pass
-                if self._last_rx and (time.monotonic() - self._last_rx) > _STALE_AFTER:
-                    _LOGGER.warning(
-                        "No data from receiver for >%.0fs; forcing reconnect",
-                        _STALE_AFTER,
-                    )
-                    try:
-                        if p.transport is not None:
-                            p.transport.close()  # -> connection_lost -> reconnect
-                    except Exception:  # pragma: no cover - defensive
-                        pass
-                    continue
-
-            if tick % _RESYNC_EVERY == 0:
+            if self._resync_every and tick % self._resync_every == 0:
+                p = self._conn.protocol
                 try:
                     await p.refresh_power()
                     await p.refresh_zone(1)

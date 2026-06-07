@@ -162,6 +162,30 @@ main {
   text-align: center;
   font-variant-numeric: tabular-nums;
   margin-bottom: 6px;
+  cursor: pointer;
+}
+
+/* Inline manual-entry field that replaces the readout on tap. */
+.vol-input {
+  width: 150px;
+  background: var(--bg);
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 40px;
+  font-weight: 700;
+  text-align: center;
+  padding: 2px 8px;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.vol-input::-webkit-outer-spin-button,
+.vol-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 #vol-value {
@@ -282,9 +306,129 @@ main {
   padding: 4px 0;
 }
 
-/* Disabled / powered-off dimming */
+/* Powered-off dimming — a visual cue only. We intentionally keep controls
+   interactive (no pointer-events:none) so a momentarily wrong/stale power
+   reading can never lock you out of the volume or other controls. */
 .dimmed {
-  opacity: 0.4;
-  pointer-events: none;
+  opacity: 0.5;
   transition: opacity 0.2s;
+}
+
+/* Top-bar right cluster + icon buttons */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.icon-btn:active {
+  background: var(--card-hi);
+}
+
+.icon-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Settings sheet overlay */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.overlay.open {
+  display: flex;
+}
+
+.sheet {
+  width: 100%;
+  max-width: 520px;
+  background: var(--card);
+  border-radius: 20px 20px 0 0;
+  padding: 8px 16px calc(24px + env(safe-area-inset-bottom));
+  animation: sheet-up 0.18s ease-out;
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 12px;
+}
+
+.sheet-head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+}
+
+.setting-label {
+  font-size: 16px;
+}
+
+/* Segmented control */
+.segmented {
+  display: inline-flex;
+  background: var(--bg);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 3px;
+}
+
+.segmented button {
+  min-width: 52px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.segmented button.active {
+  background: var(--accent);
+  color: #fff;
 }
