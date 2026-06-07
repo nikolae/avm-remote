@@ -29,6 +29,7 @@ STATE: dict[str, str] = {
     "WMAC": "00:11:22:33:44:66",
     "GCTXS": "1",
     "GCFPB": "3",
+    "GCMMV": "-20.0",  # main-zone maximum volume limit (dB)
     "ICN": "5",
     # Zone 1 live state
     "Z1POW": "1",
@@ -64,7 +65,7 @@ STATE: dict[str, str] = {
 }
 
 # Settable prefixes, longest first so matching is unambiguous.
-SET_PREFIXES = ["Z1PVOL", "Z1POW", "Z1MUT", "Z1INP", "Z1ALM", "Z1VOL", "GCTXS"]
+SET_PREFIXES = ["Z1PVOL", "Z1POW", "Z1MUT", "Z1INP", "Z1ALM", "Z1VOL", "GCMMV", "GCTXS"]
 
 
 def handle(msg: str) -> str | None:
@@ -74,6 +75,15 @@ def handle(msg: str) -> str | None:
         if key in STATE:
             return f"{key}{STATE[key]}"
         return None
+    # Listening mode: the real AVM 70/90 wants the un-padded value ("Z1ALM6")
+    # and rejects the zero-padded form ("Z1ALM06") with !E. Mimic that so tests
+    # catch the difference.
+    if msg.startswith("Z1ALM"):
+        value = msg[len("Z1ALM"):]
+        if len(value) > 1 and value[0] == "0":
+            return f"!E{msg}"
+        STATE["Z1ALM"] = value
+        return f"Z1ALM{value}"
     for prefix in SET_PREFIXES:
         if msg.startswith(prefix):
             value = msg[len(prefix):]

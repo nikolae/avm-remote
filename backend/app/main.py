@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from .anthem import AnthemController
 from .models import (
     InputCommand,
+    MaxVolumeCommand,
     ModeCommand,
     MuteCommand,
     PowerCommand,
@@ -118,6 +119,13 @@ async def set_input(cmd: InputCommand) -> ReceiverState:
 async def set_mode(cmd: ModeCommand) -> ReceiverState:
     controller = get_controller()
     _run(lambda: controller.set_listening_mode(cmd.mode))
+    return controller.snapshot()
+
+
+@app.post("/api/max_volume", response_model=ReceiverState)
+async def set_max_volume(cmd: MaxVolumeCommand) -> ReceiverState:
+    controller = get_controller()
+    _run(lambda: controller.set_max_volume_db(cmd.db))
     return controller.snapshot()
 
 

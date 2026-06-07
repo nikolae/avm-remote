@@ -63,6 +63,40 @@ DIAG_COMMANDS = [
 ]
 
 
+async def run_listen(protocol) -> None:
+    """Print every datagram the receiver pushes, after the initial sync settles.
+
+    The cleanest way to discover an unknown command: run this, then change the
+    setting on the receiver (web UI or front panel) and watch what it emits.
+    """
+    print("\n=== Listen mode ===")
+    print("Waiting for the initial sync to settle...")
+    await asyncio.sleep(3)
+    print(
+        "Ready. Now change the setting on the receiver (e.g. the maximum volume "
+        "in the web UI) and watch what appears below. Ctrl-C to stop.\n"
+    )
+
+    original_data_received = protocol.data_received
+
+    def tap(data):
+        try:
+            for msg in data.decode(errors="ignore").split(";"):
+                if msg.strip():
+                    print(f"  {msg}")
+        except Exception:
+            pass
+        return original_data_received(data)
+
+    protocol.data_received = tap
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        protocol.data_received = original_data_received
+
+
 async def run_raw(protocol, commands: list[str]) -> None:
     """Send arbitrary raw commands and print exactly what the receiver replies.
 
@@ -165,6 +199,12 @@ async def main() -> None:
         "--raw 'Z1ALM?' 'Z1ALM03' 'Z1ALM?' (no trailing ';'). Great for "
         "discovering how your unit numbers listening modes.",
     )
+    parser.add_argument(
+        "--listen",
+        action="store_true",
+        help="After the initial sync, print every datagram the receiver pushes. "
+        "Change a setting in the web UI / front panel to discover its command.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING)
@@ -210,6 +250,9 @@ async def main() -> None:
 
     if args.raw:
         await run_raw(conn.protocol, args.raw)
+
+    if args.listen:
+        await run_listen(conn.protocol)
 
     if args.watch:
         print("\nWatching for changes (Ctrl-C to quit) ...")

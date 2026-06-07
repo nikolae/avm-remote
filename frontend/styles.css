@@ -405,6 +405,52 @@ main {
 
 .setting-label {
   font-size: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.setting-label small {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Number setting (e.g. maximum volume) */
+.num-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.num-unit {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.num-input {
+  width: 64px;
+  background: var(--bg);
+  border: 1px solid var(--card-hi);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  padding: 8px 6px;
+  outline: none;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.num-input:focus {
+  border-color: var(--accent);
+}
+
+.num-input::-webkit-outer-spin-button,
+.num-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 /* Segmented control */

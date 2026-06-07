@@ -14,6 +14,7 @@ const volSlider = el("vol-slider");
 const muteBtn = el("mute");
 const inputsEl = el("inputs");
 const modesEl = el("modes");
+const maxVolInput = el("set-max-vol");
 
 // Latest known state from the server.
 let state = null;
@@ -45,7 +46,14 @@ function optimistic(patch) {
 
 // --- Settings (persisted in localStorage) ------------------------------------
 const SETTINGS_KEY = "avm-remote-settings";
-const DEFAULT_SETTINGS = { volumeUnit: "db" }; // "db" | "pct"
+const DEFAULT_SETTINGS = {
+  volumeUnit: "db", // "db" | "pct"
+  // Volume range the slider maps onto, in dB. maxVolumeDb should match the
+  // receiver's configured "maximum volume" so the dB readout/slider make sense.
+  // (Querying this from the unit over IP is TODO — see TODO.md.)
+  maxVolumeDb: 0,
+};
+const VOL_FLOOR_DB = -90; // slider's 0% position (receiver mute floor)
 
 function loadSettings() {
   try {
@@ -65,9 +73,16 @@ const settings = loadSettings();
 
 // --- Volume display ----------------------------------------------------------
 const fmtDb = (db) => (Number.isInteger(db) ? String(db) : db.toFixed(1));
-// Estimate dB for a slider position during a drag (90 dB span over 0-100%); the
-// receiver's true dB snaps in over the WebSocket on release.
-const estDb = (pct) => Math.round((pct - 100) * 0.9);
+// The receiver's own max-volume limit (GCMMV) is authoritative when known; the
+// manual setting is just a fallback for when it hasn't been reported yet.
+const maxDb = () =>
+  state && state.max_volume_db != null
+    ? state.max_volume_db
+    : Number(settings.maxVolumeDb) || 0;
+// Map a slider percentage to an estimated dB across [VOL_FLOOR_DB .. maxVolumeDb].
+// Used for the live drag readout; the receiver's true dB snaps in on release.
+const estDb = (pct) =>
+  Math.round(VOL_FLOOR_DB + (pct / 100) * (maxDb() - VOL_FLOOR_DB));
 
 // Readout for a given state, honoring the volume-unit setting.
 function volumeReadout(s) {
@@ -78,11 +93,30 @@ function volumeReadout(s) {
       : String(estDb(s.volume));
   return { value: db, unit: "dB" };
 }
-// Readout for a slider position mid-drag (no receiver value yet).
-function dragReadout(pct) {
-  if (settings.volumeUnit === "pct") return { value: String(pct), unit: "%" };
-  return { value: String(estDb(pct)), unit: "dB" };
+// Readout for a raw slider position mid-drag, in the slider's current unit.
+function sliderReadout(v) {
+  return settings.volumeUnit === "pct"
+    ? { value: String(Math.round(v)), unit: "%" }
+    : { value: fmtDb(v), unit: "dB" };
 }
+// Point the slider's scale at the current unit. In dB mode the slider range IS
+// [floor .. max], so it visibly rescales whenever the max-volume limit changes;
+// in % mode it's the raw 0-100 PVOL.
+function configureSlider(s) {
+  if (settings.volumeUnit === "pct") {
+    volSlider.min = 0;
+    volSlider.max = 100;
+    volSlider.step = 1;
+    volSlider.value = s.volume;
+  } else {
+    volSlider.min = VOL_FLOOR_DB;
+    volSlider.max = maxDb();
+    volSlider.step = 0.5;
+    volSlider.value = s.volume_db != null ? s.volume_db : estDb(s.volume);
+  }
+}
+// Convert a slider value (in the current unit) to a 0-100 PVOL level to send.
+const sliderLevel = (v) => Math.max(0, Math.min(100, pctFromTyped(v)));
 const volUnit = document.querySelector(".vol-unit");
 function setVolDisplay({ value, unit }) {
   volValue.textContent = value;
@@ -106,21 +140,40 @@ function render(next) {
 
   // Now playing
   npInput.textContent = next.input_name || (next.power ? "—" : "Standby");
-  npMode.textContent = next.listening_mode || "";
-  const parts = [next.audio_format, next.audio_channels];
-  if (next.sample_rate) parts.push(`${next.sample_rate} kHz`);
-  if (next.video_resolution && next.video_resolution !== "No video") {
-    parts.push(next.video_resolution);
+  const noSignal =
+    !next.audio_format ||
+    next.audio_format === "No audio" ||
+    next.audio_input_name === "No Signal";
+  // The listening mode is only meaningful with a live signal (the receiver locks
+  // it to "None" otherwise), so hide it when there's nothing playing.
+  npMode.textContent = noSignal ? "" : next.listening_mode || "";
+  let parts;
+  if (!next.power) {
+    parts = [];
+  } else if (noSignal) {
+    parts = next.input_name ? ["No signal"] : [];
+  } else {
+    parts = [next.audio_format, next.audio_channels];
+    if (next.sample_rate) parts.push(`${next.sample_rate} kHz`);
+    if (next.video_resolution && next.video_resolution !== "No video") {
+      parts.push(next.video_resolution);
+    }
   }
   npFormat.textContent = parts.filter(Boolean).join(" · ");
 
   // Volume (don't fight an active drag)
   if (!draggingVolume) {
-    volSlider.value = next.volume;
+    configureSlider(next);
     setVolDisplay(volumeReadout(next));
   }
   muteBtn.classList.toggle("active", next.mute);
   muteBtn.textContent = next.mute ? "Muted" : "Mute";
+
+  // Reflect the receiver's max-volume limit in the settings field (unless the
+  // user is actively editing it).
+  if (next.max_volume_db != null && document.activeElement !== maxVolInput) {
+    maxVolInput.value = next.max_volume_db;
+  }
 
   renderPills(
     inputsEl,
@@ -179,24 +232,41 @@ muteBtn.addEventListener("click", () => {
   postCmd("/api/mute", {});
 });
 
-function nudge(step) {
-  const cur = state ? state.volume : 0;
-  optimistic({ volume: Math.max(0, Math.min(100, cur + step)) });
-  postCmd("/api/volume", { step });
+// Nudge the volume: ±1 dB in dB mode, ±2% in % mode.
+function nudge(dir) {
+  if (settings.volumeUnit === "pct") {
+    const cur = state ? state.volume : 0;
+    const level = Math.max(0, Math.min(100, cur + dir * 2));
+    optimistic({ volume: level });
+    postCmd("/api/volume", { level });
+  } else {
+    const curDb =
+      state && state.volume_db != null ? state.volume_db : estDb(state ? state.volume : 0);
+    const newDb = Math.max(VOL_FLOOR_DB, Math.min(maxDb(), curDb + dir));
+    const level = sliderLevel(newDb);
+    optimistic({ volume: level, volume_db: newDb });
+    postCmd("/api/volume", { level });
+  }
 }
-el("vol-up").addEventListener("click", () => nudge(2));
-el("vol-down").addEventListener("click", () => nudge(-2));
+el("vol-up").addEventListener("click", () => nudge(+1));
+el("vol-down").addEventListener("click", () => nudge(-1));
 
 // Live readout while dragging; commit on release.
 volSlider.addEventListener("input", () => {
   draggingVolume = true;
-  setVolDisplay(dragReadout(Number(volSlider.value)));
+  setVolDisplay(sliderReadout(Number(volSlider.value)));
 });
 function commitVolume() {
   if (!draggingVolume) return;
   draggingVolume = false;
-  const level = Number(volSlider.value);
-  optimistic({ volume: level });
+  const v = Number(volSlider.value);
+  const level = sliderLevel(v);
+  // Hold the dragged position (including the dB) until the receiver confirms.
+  optimistic(
+    settings.volumeUnit === "pct"
+      ? { volume: level }
+      : { volume: level, volume_db: v }
+  );
   postCmd("/api/volume", { level });
 }
 volSlider.addEventListener("change", commitVolume);
@@ -210,8 +280,8 @@ const volValueSpan = el("vol-value");
 function pctFromTyped(num) {
   // Interpret the typed value in whatever unit is shown, return a 0-100 level.
   if (settings.volumeUnit === "pct") return Math.round(num);
-  // dB -> % using the same linear map the readout estimate uses (inverse of estDb).
-  return Math.round(num / 0.9 + 100);
+  // dB -> % across [VOL_FLOOR_DB .. maxVolumeDb] (inverse of estDb).
+  return Math.round(((num - VOL_FLOOR_DB) / (maxDb() - VOL_FLOOR_DB)) * 100);
 }
 
 function openVolumeEntry() {
@@ -346,6 +416,30 @@ function initSegmented(id, key) {
   sync();
 }
 initSegmented("seg-volume-unit", "volumeUnit");
+
+// Maximum volume: writes the limit to the receiver (GCMMV) and keeps a local
+// fallback used to scale the slider until the device reports its own value.
+maxVolInput.value = settings.maxVolumeDb;
+maxVolInput.addEventListener("change", () => {
+  const num = parseFloat(maxVolInput.value);
+  if (Number.isNaN(num)) {
+    maxVolInput.value = settings.maxVolumeDb; // restore on bad input
+    return;
+  }
+  // Snap to the receiver's 0.5 dB granularity and clamp to a sane range.
+  const db = Math.max(-90, Math.min(10, Math.round(num * 2) / 2));
+  maxVolInput.value = db;
+  settings.maxVolumeDb = db;
+  saveSettings();
+  postCmd("/api/max_volume", { db }); // set it on the receiver
+  // Optimistically apply so the slider's dB scale recomputes immediately
+  // (otherwise maxDb() keeps returning the old device value until the
+  // round-trip arrives).
+  if (state) {
+    state.max_volume_db = db;
+    render(state);
+  }
+});
 
 // --- PWA service worker ------------------------------------------------------
 if ("serviceWorker" in navigator) {

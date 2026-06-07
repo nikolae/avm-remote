@@ -16,10 +16,21 @@ import socket
 from typing import Optional
 
 from anthemav.connection import Connection
+from anthemav import protocol as _anthem_protocol
 
 from .models import Input, ReceiverState
 
 _LOGGER = logging.getLogger(__name__)
+
+# The AVM 70/90 reports its main-zone maximum volume limit (in dB, 0.5 dB steps)
+# via the GCMMV command, which anthemav doesn't know about. Register it in the
+# library's lookup table (before any AVR instance is created) so it's queried by
+# refresh_all, parsed, stored as protocol._GCMMV, and fires update callbacks like
+# any built-in attribute. Setting is just `command("GCMMV<dB>")`.
+_MAX_VOLUME_CMD = "GCMMV"
+_anthem_protocol.LOOKUP.setdefault(
+    _MAX_VOLUME_CMD, {"description": "Maximum main volume (dB)"}
+)
 
 # Bound each subscriber queue so a slow/dead client can't grow memory without
 # limit; we only ever care about the latest state, so we drop the oldest.
@@ -80,6 +91,12 @@ class AnthemController:
             # was installed, so apply keepalive to it explicitly.
             self._install_hooks()
             self._configure_socket()
+            # Query the max-volume limit up front (it's a config value the unit
+            # answers regardless of power; refresh_all also re-queries it later).
+            try:
+                self._conn.protocol.query(_MAX_VOLUME_CMD)
+            except Exception:  # pragma: no cover - defensive
+                pass
             _LOGGER.info("Connected to Anthem at %s:%s", self._host, self._port)
             self._broadcast(self.snapshot())
         except Exception:  # pragma: no cover - defensive
@@ -244,12 +261,23 @@ class AnthemController:
             except ValueError:
                 volume_db = None
 
+        # Max volume limit (GCMMV), registered in the library's lookup above so
+        # its value lands on protocol._GCMMV. Half-dB steps -> parse as float.
+        max_volume_db: Optional[float] = None
+        raw_max = getattr(p, f"_{_MAX_VOLUME_CMD}", "")
+        if raw_max:
+            try:
+                max_volume_db = float(raw_max)
+            except ValueError:
+                max_volume_db = None
+
         return ReceiverState(
             connected=self.connected,
             model=p.model,
             power=bool(p.power),
             volume=int(p.volume),
             volume_db=volume_db,
+            max_volume_db=max_volume_db,
             mute=bool(zone.mute),
             input_number=int(zone.input_number),
             input_name=zone.input_name if inputs else "",
@@ -315,5 +343,19 @@ class AnthemController:
         self._require_protocol().zones[1].input_number = number
 
     def set_listening_mode(self, mode: str) -> None:
-        # Setting by display name maps to the model-correct ALM number internally.
-        self._require_protocol().audio_listening_mode_text = mode
+        # NOTE: we can't use anthemav's audio_listening_mode_text setter — it
+        # zero-pads the value (e.g. "Z1ALM06"), which the AVM 70/90 rejects with
+        # !E. The x40 firmware wants the un-padded form ("Z1ALM6"), verified on
+        # the unit. Send it directly using the model's ALM number table.
+        p = self._require_protocol()
+        alm = getattr(p, "_alm_number", None) or {}
+        if mode not in alm:
+            return
+        p.command(f"Z1ALM{alm[mode]}")
+        p.query("Z1ALM")  # read back to confirm
+
+    def set_max_volume_db(self, db: float) -> None:
+        # The receiver expects one decimal place (0.5 dB steps), e.g. "GCMMV-20.0".
+        p = self._require_protocol()
+        p.command(f"{_MAX_VOLUME_CMD}{db:.1f}")
+        p.query(_MAX_VOLUME_CMD)  # read back to confirm / refresh state

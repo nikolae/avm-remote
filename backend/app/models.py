@@ -24,6 +24,7 @@ class ReceiverState(BaseModel):
     power: bool = False
     volume: int = 0  # 0-100 (PVOL on x40)
     volume_db: float | None = None  # actual attenuation in dB (Z1VOL), if reported
+    max_volume_db: float | None = None  # main-zone max volume limit (GCMMV), if known
     mute: bool = False
 
     input_number: int = 0
@@ -66,3 +67,8 @@ class InputCommand(BaseModel):
 class ModeCommand(BaseModel):
     # Listening mode by its display name (e.g. "Dolby Surround").
     mode: str
+
+
+class MaxVolumeCommand(BaseModel):
+    # Main-zone maximum volume limit, in dB (the receiver uses 0.5 dB steps).
+    db: float = Field(ge=-90, le=10)
