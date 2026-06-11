@@ -429,6 +429,21 @@ maxVolInput.addEventListener("change", () => {
   }
 });
 
+// Manual reconnect: drop and re-establish the receiver session.
+const reconnectBtn = el("reconnect-btn");
+reconnectBtn.addEventListener("click", async () => {
+  reconnectBtn.disabled = true;
+  reconnectBtn.textContent = "Reconnecting…";
+  await postCmd("/api/reconnect", {});
+  // Give the link a moment to drop and come back, then refresh.
+  setTimeout(async () => {
+    await pollState();
+    if (!ws || ws.readyState > 1) connectWS();
+    reconnectBtn.disabled = false;
+    reconnectBtn.textContent = "Reconnect";
+  }, 2500);
+});
+
 // --- PWA service worker ------------------------------------------------------
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () =>

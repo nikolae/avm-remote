@@ -79,6 +79,15 @@ async def get_state() -> ReceiverState:
     return get_controller().snapshot()
 
 
+@app.post("/api/reconnect")
+async def reconnect() -> dict:
+    # Manually drop and re-establish the receiver session — recovers a hung
+    # connection without waiting for the watchdog or restarting the container.
+    dropped = get_controller().force_reconnect()
+    _LOGGER.info("Manual reconnect requested (dropped existing link: %s)", dropped)
+    return {"status": "reconnecting", "dropped": dropped}
+
+
 @app.post("/api/power", response_model=ReceiverState)
 async def set_power(cmd: PowerCommand) -> ReceiverState:
     controller = get_controller()

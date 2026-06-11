@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 from typing import Optional
 
 from anthemav.connection import Connection
@@ -40,6 +41,11 @@ _QUEUE_MAXSIZE = 8
 # configurable (ANTHEM_RESYNC_SECONDS) and converted to a tick count at runtime.
 _POLL_INTERVAL = 2.0  # seconds between loop ticks / connection-state checks
 _DEFAULT_RESYNC_SECONDS = 30.0
+# If the receiver is powered on but we've heard nothing back for this long
+# (despite the periodic resync queries), the read side has wedged — reconnect.
+# Gated on power so an idle/off receiver, which is legitimately quiet, is never
+# torn down (that would break power-on).
+_STALE_AFTER = 90.0
 
 
 class AnthemController:
@@ -64,6 +70,7 @@ class AnthemController:
         self._task: Optional[asyncio.Task] = None
         self._maintain_task: Optional[asyncio.Task] = None
         self._last_connected: Optional[bool] = None
+        self._last_rx: float = 0.0  # monotonic time of the last datagram received
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -90,6 +97,7 @@ class AnthemController:
             # The first connection_made fired inside create() before our hook
             # was installed, so apply keepalive to it explicitly.
             self._install_hooks()
+            self._last_rx = time.monotonic()
             self._configure_socket()
             # Query the max-volume limit up front (it's a config value the unit
             # answers regardless of power; refresh_all also re-queries it later).
@@ -109,8 +117,27 @@ class AnthemController:
         if self._conn:
             self._conn.close()
 
+    def force_reconnect(self) -> bool:
+        """Drop the current link so anthemav opens a fresh session.
+
+        Recovers a receiver whose control session has hung at the application
+        level (TCP still up, but no data flowing). Returns True if a live
+        transport was closed.
+        """
+        p = self._protocol
+        if p is None:
+            return False
+        self._last_rx = time.monotonic()  # reset so the watchdog doesn't re-fire
+        if p.transport is not None:
+            try:
+                p.transport.close()  # -> connection_lost -> auto-reconnect
+                return True
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return False
+
     def _install_hooks(self) -> None:
-        """Wrap the protocol's connection_made to reapply keepalive on reconnect.
+        """Patch the protocol to track liveness, keep keepalive, and fix a read bug.
 
         anthemav's `Connection` reuses the same protocol instance across
         reconnects, so patching once here covers every future reconnect too.
@@ -120,14 +147,54 @@ class AnthemController:
             return
 
         orig_connection_made = p.connection_made
+        orig_data_received = p.data_received
 
         def connection_made(transport):
             result = orig_connection_made(transport)
+            self._last_rx = time.monotonic()
             self._configure_socket()
             self._broadcast(self.snapshot())  # surface reconnects promptly
             return result
 
+        def data_received(data):
+            self._last_rx = time.monotonic()
+            return orig_data_received(data)
+
+        async def assemble_buffer():
+            # Reimplements anthemav's _assemble_buffer so a parse error can't
+            # wedge the read side. The stock version calls pause_reading(),
+            # parses, then resume_reading() with no guard — if any datagram
+            # throws mid-parse, reading stays paused forever (socket up, writes
+            # work, but no data is ever read again). Here we always resume, and
+            # isolate failures to the single offending datagram.
+            if p.transport is None:
+                return
+            p.transport.pause_reading()
+            data, p.buffer = p.buffer, ""
+            try:
+                for message in data.split(";"):
+                    try:
+                        if message != "":
+                            await p._parse_message(message)
+                        elif p._last_command != "":
+                            last_command = p._last_command
+                            p._last_command = ""
+                            await p._parse_message(last_command)
+                    except Exception:  # pragma: no cover - defensive
+                        _LOGGER.warning(
+                            "Error parsing datagram %r; skipping", message,
+                            exc_info=True,
+                        )
+            finally:
+                if p.transport is not None:
+                    try:
+                        p.transport.resume_reading()
+                    except RuntimeError:
+                        pass  # already reading
+
         p.connection_made = connection_made
+        p.data_received = data_received
+        p._assemble_buffer = assemble_buffer
         p._avmremote_hooked = True
 
     def _configure_socket(self) -> None:
@@ -183,14 +250,30 @@ class AnthemController:
                 continue
 
             tick += 1
+            p = self._conn.protocol
+
             if self._resync_every and tick % self._resync_every == 0:
-                p = self._conn.protocol
                 try:
                     await p.refresh_power()
                     await p.refresh_zone(1)
                     await p.refresh_all()
                 except Exception:  # pragma: no cover - defensive
                     pass
+
+            # Read-stall watchdog: if the unit is powered on but the resync
+            # queries above have gone unanswered for too long, the read side has
+            # wedged — force a reconnect to recover. (Powered-off receivers are
+            # legitimately silent, so we leave those alone.)
+            if (
+                bool(p.power)
+                and self._last_rx
+                and (time.monotonic() - self._last_rx) > _STALE_AFTER
+            ):
+                _LOGGER.warning(
+                    "No data from receiver for >%.0fs while powered on; reconnecting",
+                    _STALE_AFTER,
+                )
+                self.force_reconnect()
 
     # --- pub/sub --------------------------------------------------------------
 

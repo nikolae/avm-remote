@@ -453,6 +453,28 @@ main {
   margin: 0;
 }
 
+/* Text action button (e.g. Reconnect) */
+.text-btn {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 10px;
+  background: var(--card-hi);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.text-btn:active {
+  background: var(--accent-dim);
+}
+
+.text-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Segmented control */
 .segmented {
   display: inline-flex;
