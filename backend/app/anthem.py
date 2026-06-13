@@ -41,11 +41,12 @@ _QUEUE_MAXSIZE = 8
 # configurable (ANTHEM_RESYNC_SECONDS) and converted to a tick count at runtime.
 _POLL_INTERVAL = 2.0  # seconds between loop ticks / connection-state checks
 _DEFAULT_RESYNC_SECONDS = 30.0
-# If the receiver is powered on but we've heard nothing back for this long
-# (despite the periodic resync queries), the read side has wedged — reconnect.
-# Gated on power so an idle/off receiver, which is legitimately quiet, is never
-# torn down (that would break power-on).
-_STALE_AFTER = 90.0
+# Watchdog: if the receiver is powered on but we've heard nothing back for this
+# long (despite the resync queries actively probing it), the link has wedged —
+# reconnect. Set per-instance to ~2 missed resyncs so it can't false-fire on a
+# healthy connection (whose resync refreshes it every interval). Gated on power
+# so an idle/off receiver, which is legitimately quiet, is never torn down.
+_STALE_FLOOR = 45.0  # never fire sooner than this, regardless of resync interval
 
 
 class AnthemController:
@@ -63,8 +64,12 @@ class AnthemController:
         # (minimum 1 tick). 0 or negative disables periodic resync.
         if resync_seconds and resync_seconds > 0:
             self._resync_every = max(1, round(resync_seconds / _POLL_INTERVAL))
+            # Reconnect after ~2 missed resyncs of silence. The watchdog relies
+            # on the resync as its active probe, so it's disabled without one.
+            self._stale_after = max(_STALE_FLOOR, resync_seconds * 2)
         else:
             self._resync_every = 0
+            self._stale_after = 0.0  # no active probe -> watchdog disabled
         self._conn: Optional[Connection] = None
         self._subscribers: set[asyncio.Queue[ReceiverState]] = set()
         self._task: Optional[asyncio.Task] = None
@@ -265,13 +270,14 @@ class AnthemController:
             # wedged — force a reconnect to recover. (Powered-off receivers are
             # legitimately silent, so we leave those alone.)
             if (
-                bool(p.power)
+                self._stale_after
+                and bool(p.power)
                 and self._last_rx
-                and (time.monotonic() - self._last_rx) > _STALE_AFTER
+                and (time.monotonic() - self._last_rx) > self._stale_after
             ):
                 _LOGGER.warning(
                     "No data from receiver for >%.0fs while powered on; reconnecting",
-                    _STALE_AFTER,
+                    self._stale_after,
                 )
                 self.force_reconnect()
 
